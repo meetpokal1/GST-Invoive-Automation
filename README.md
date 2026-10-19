@@ -1,83 +1,100 @@
 # GST Invoice & Ledger Automation Tool
 
-A Python tool that automates GST (Goods & Services Tax) validation and ledger
-generation for a batch of invoices — turning a manual, error-prone accounting
-task into a one-click check.
+A small Python application that checks invoice-level GST calculations and generates a review-ready Excel ledger. It demonstrates business-rule automation, tabular data validation, exception reporting, and Excel report generation.
 
-## Problem Statement
+> **Scope note:** This is a learning and demonstration project, not a complete GST-compliance product or a substitute for professional tax advice. It uses a simplified state-comparison rule for CGST/SGST versus IGST and assumes invoice value equals taxable value plus GST. It does not cover every place-of-supply rule, exempt supply, cess, discounts, freight, reverse charge, credit/debit notes, or other special cases.
 
-During an accounting internship, invoice-level GST validation (checking whether
-CGST/SGST/IGST was calculated correctly, and whether it matches intra-state vs.
-inter-state supply rules) was done manually in Excel — slow, and easy to get
-wrong when volumes are high. This tool automates that entire check:
+## What it does
 
-1. Reads a batch of invoices (CSV/Excel)
-2. Applies India's GST rule automatically:
-   - **Same state (seller = buyer)** → CGST + SGST (split equally)
-   - **Different state** → IGST (full rate)
-3. Compares the *expected* tax values against what's actually on the invoice
-4. Flags any mismatches with the exact reason (e.g. "IGST off by ₹2,000")
-5. Generates a clean, multi-sheet Excel ledger (Summary / All Invoices / Mismatches Only)
+- Reads invoice batches from CSV or Excel files.
+- Checks required columns, blank fields, dates, numeric values, GST-rate bounds, and duplicate invoice numbers.
+- Calculates expected CGST/SGST for same-state transactions and IGST for different-state transactions under the simplified rules described above.
+- Flags tax-component or invoice-total differences above a configurable paise-level tolerance.
+- Creates an Excel workbook with Summary, All Invoices, and Mismatches Only sheets.
+- Offers a Streamlit interface and a command-line workflow.
 
-## Tech Stack
+## Tech stack
 
-- **Python 3** — core logic
-- **pandas** — data processing
-- **openpyxl** — Excel report generation
-- **Streamlit** — interactive web UI
+- Python
+- pandas
+- openpyxl
+- Streamlit
+- pytest
 
-## Project Structure
+## Project structure
 
-```
-gst-invoice-automation/
-├── app.py                     # Streamlit web app (upload → validate → download)
-├── gst_engine.py               # Core GST calculation + validation logic
-├── generate_ledger.py          # CLI entry point (no UI needed)
-├── sample_data/
-│   └── invoices_sample.csv     # 10 sample invoices (2 with intentional errors)
-├── requirements.txt
-└── README.md
-```
+- app.py — Streamlit interface
+- gst_engine.py — tax calculations, validation and reporting
+- generate_ledger.py — command-line entry point
+- requirements.txt — dependencies
+- sample_data/invoices_sample.csv — synthetic demo data
+- tests/test_gst_engine.py — automated tests
+- .github/workflows/tests.yml — GitHub Actions test workflow
 
-## How to Run
+## Run locally
 
-**Option 1 — Web app**
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-Then upload `sample_data/invoices_sample.csv` (or your own file) in the browser.
+Use Python 3.10 or later. From the repository root, create a virtual environment:
 
-**Option 2 — Command line**
-```bash
-pip install -r requirements.txt
-python generate_ledger.py sample_data/invoices_sample.csv output_ledger.xlsx
-```
+    python -m venv .venv
 
-## Sample Output
+Activate it, then install dependencies:
 
-Running the CLI on the sample data:
+    # Windows PowerShell
+    .\.venv\Scripts\Activate.ps1
 
-```
-Total Invoices: 10
-Total Taxable Amount: 720000
-Total CGST Collected: 20250
-Total SGST Collected: 20250
-Total IGST Collected: 84400
-Total Invoice Value: 844150
-Invoices Flagged as Mismatch: 2
-2 invoice(s) flagged for review.
-```
+    # macOS / Linux
+    source .venv/bin/activate
 
-## What I'd Improve Next
+    python -m pip install -r requirements.txt
 
-- Add support for reading invoices directly from a GST portal export (JSON) format
-- Add a "correct the invoice" auto-fix suggestion, not just a flag
-- Add unit tests (currently validated manually against known-correct sample data)
-- Deploy a live demo on Streamlit Community Cloud
+### Option 1: Streamlit app
 
-## Why I Built This
+    streamlit run app.py
 
-I wanted a project that connects my accounting/GST work experience with the
-Python and automation skills I'm developing for an ERP/cloud role — this is
-the exact kind of manual reconciliation task ERP systems are meant to remove.
+Upload sample_data/invoices_sample.csv, or upload a CSV/Excel file with the required columns. Set the seller state in the sidebar. The included sample is synthetic and contains two intentional tax mismatches.
+
+### Option 2: Generate an Excel ledger from the terminal
+
+    python generate_ledger.py sample_data/invoices_sample.csv output_ledger.xlsx Maharashtra
+
+The generated workbook contains:
+
+- **Summary** — invoice count, amounts, tax totals, flagged count and report timestamp.
+- **All Invoices** — source data, calculated expected values, validation status and mismatch reasons.
+- **Mismatches Only** — only records requiring review.
+
+## Run tests
+
+    python -m pytest -q
+
+Tests cover intra-state and inter-state calculations, the sample data, paise-level tolerance, missing columns, invalid numbers and dates, duplicate invoice IDs, blank states, negative amounts, empty files, output workbook sheets and unsupported file extensions. GitHub Actions runs the same test suite on pushes and pull requests.
+
+## Input data format
+
+The input must include these columns (column-name case and surrounding whitespace are normalised):
+
+invoice_no, date, customer_name, customer_state, taxable_amount, gst_rate, cgst_amt, sgst_amt, igst_amt, invoice_total
+
+Invoice numbers must be unique within the uploaded batch. This first version expects non-negative taxable amounts and tax values; credit notes and negative-value invoices are outside scope. Rates are expressed as percentages, for example 18 for 18%.
+
+## Business rules and limitations
+
+- A buyer state matching the seller state after whitespace and case normalisation is treated as intra-state; otherwise it is treated as inter-state.
+- CGST and SGST are rounded independently to two decimal places. IGST is rounded to two decimal places.
+- Tax components and invoice totals are compared with a tolerance of ₹0.02 to avoid flagging tiny paise-level differences. Change TOLERANCE in gst_engine.py if a different review policy is needed.
+- The app flags discrepancies for human review; it does not automatically alter original invoice values or certify that an invoice is legally compliant.
+
+## Example use case
+
+An accounts or operations team exports a batch of invoices from its billing system. The tool identifies records whose entered tax split or total differs from the simplified expected calculation and creates a separate review sheet so the team can investigate exceptions rather than checking every row manually.
+
+## Future improvements
+
+- Add configurable seller GSTIN and appropriate place-of-supply rules.
+- Add richer audit trails and configurable business policies.
+- Support credit notes, exempt items, cess, discounts and other invoice components.
+- Add CSV schema templates, broader integration tests and a deployed demo using synthetic data only.
+
+## Responsible use
+
+Use synthetic or properly authorised data in demos. Do not upload confidential customer, financial or tax records to a public deployment. This project is intended for learning and demonstration, not for filing tax returns or replacing review by a qualified professional.
