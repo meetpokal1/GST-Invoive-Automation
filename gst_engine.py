@@ -1,117 +1,230 @@
-"""
-gst_engine.py
-Core logic for GST calculation, invoice validation, and ledger generation.
+"""Core GST calculation, invoice validation, and ledger generation.
 
-Business rule:
-- If buyer's state == seller's state  -> Intra-state supply -> CGST + SGST (split equally)
-- If buyer's state != seller's state  -> Inter-state supply -> IGST (full rate)
-
-This mirrors how GST actually works in India for CA/accounts teams doing
-manual invoice checking - which is the real-world process this tool automates.
+This project is a small demonstration tool, not a complete GST-compliance
+system. It implements a simplified state-based CGST/SGST vs IGST rule and
+expects invoice totals to equal taxable value plus the calculated GST.
 """
+
+from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
 
 import pandas as pd
-from datetime import datetime
 
-# Rounding tolerance (in Rs.) before we flag something as a mismatch.
-# Real invoices often have paisa-level rounding differences that are NOT errors.
-TOLERANCE = 0.5
+# Allow small paise-level differences while still flagging meaningful errors.
+TOLERANCE = 0.02
+
+REQUIRED_COLUMNS = [
+    "invoice_no",
+    "date",
+    "customer_name",
+    "customer_state",
+    "taxable_amount",
+    "gst_rate",
+    "cgst_amt",
+    "sgst_amt",
+    "igst_amt",
+    "invoice_total",
+]
+NUMERIC_COLUMNS = [
+    "taxable_amount",
+    "gst_rate",
+    "cgst_amt",
+    "sgst_amt",
+    "igst_amt",
+    "invoice_total",
+]
 
 
-def calculate_gst(taxable_amount: float, gst_rate: float, seller_state: str, buyer_state: str) -> dict:
+def _money(value) -> float:
+    """Round a numeric value to two decimal places using half-up rounding."""
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"Expected a valid numeric amount; received {value!r}.") from exc
+    if not amount.is_finite():
+        raise ValueError("Amounts and tax rates must be finite numbers.")
+    return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _normalise_state(state: str, field_name: str) -> str:
+    if state is None or pd.isna(state) or not str(state).strip():
+        raise ValueError(f"{field_name} must not be blank.")
+    return " ".join(str(state).split()).casefold()
+
+
+def calculate_gst(
+    taxable_amount: float,
+    gst_rate: float,
+    seller_state: str,
+    buyer_state: str,
+) -> dict:
+    """Return expected tax values under this project's simplified state rule.
+
+    Same-state transactions are treated as CGST + SGST; different-state
+    transactions are treated as IGST. This is not a complete implementation
+    of all GST place-of-supply or tax-treatment rules.
     """
-    Given a taxable amount and GST rate, return the CORRECT expected
-    CGST / SGST / IGST split based on seller and buyer state.
-    """
-    total_tax = round(taxable_amount * (gst_rate / 100), 2)
+    taxable = _money(taxable_amount)
+    rate = _money(gst_rate)
+    seller = _normalise_state(seller_state, "Seller state")
+    buyer = _normalise_state(buyer_state, "Buyer state")
 
-    if seller_state.strip().lower() == buyer_state.strip().lower():
-        # Intra-state: split equally between Central and State GST
-        cgst = round(total_tax / 2, 2)
-        sgst = round(total_tax / 2, 2)
+    if taxable < 0:
+        raise ValueError("Taxable amount cannot be negative in this demo.")
+    if not 0 <= rate <= 100:
+        raise ValueError("GST rate must be between 0 and 100.")
+
+    if seller == buyer:
+        # Round each tax component independently to paise.
+        cgst = _money(Decimal(str(taxable)) * Decimal(str(rate)) / Decimal("200"))
+        sgst = _money(Decimal(str(taxable)) * Decimal(str(rate)) / Decimal("200"))
         igst = 0.0
     else:
-        # Inter-state: full amount goes as Integrated GST
         cgst = 0.0
         sgst = 0.0
-        igst = total_tax
+        igst = _money(Decimal(str(taxable)) * Decimal(str(rate)) / Decimal("100"))
+
+    total_tax = _money(cgst + sgst + igst)
+    invoice_total = _money(taxable + total_tax)
 
     return {
         "expected_cgst": cgst,
         "expected_sgst": sgst,
         "expected_igst": igst,
         "expected_total_tax": total_tax,
-        "expected_invoice_total": round(taxable_amount + total_tax, 2),
+        "expected_invoice_total": invoice_total,
     }
 
 
+def _prepare_invoice_data(df: pd.DataFrame, seller_state: str) -> pd.DataFrame:
+    """Normalise columns and reject rows that cannot be safely validated."""
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError("Input must be a CSV or Excel table.")
+    if df.empty:
+        raise ValueError("The uploaded file contains no invoice rows.")
+
+    clean = df.copy()
+    clean.columns = [str(column).strip().lower() for column in clean.columns]
+    if len(set(clean.columns)) != len(clean.columns):
+        raise ValueError("Column names must be unique after trimming spaces and case.")
+
+    missing_columns = [column for column in REQUIRED_COLUMNS if column not in clean.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required column(s): {', '.join(missing_columns)}")
+
+    # Report human-readable spreadsheet row numbers (header is row 1).
+    for column in ("invoice_no", "customer_name", "customer_state", "date"):
+        values = clean[column]
+        blank = values.isna() | values.astype(str).str.strip().eq("")
+        if blank.any():
+            rows = [str(index + 2) for index in clean.index[blank].tolist()]
+            raise ValueError(
+                f"Column '{column}' contains blank values on spreadsheet row(s): {', '.join(rows)}."
+            )
+
+    # Invoice numbers should be unique in a single batch to avoid double-counting.
+    invoice_numbers = clean["invoice_no"].astype(str).str.strip()
+    duplicates = invoice_numbers.duplicated(keep=False)
+    if duplicates.any():
+        values = sorted(invoice_numbers[duplicates].unique().tolist())
+        raise ValueError(f"Duplicate invoice number(s) found: {', '.join(values)}")
+    clean["invoice_no"] = invoice_numbers
+
+    # Validate dates explicitly, then store parsed dates for reliable output.
+    parsed_dates = pd.to_datetime(clean["date"], errors="coerce")
+    if parsed_dates.isna().any():
+        rows = [str(index + 2) for index in clean.index[parsed_dates.isna()].tolist()]
+        raise ValueError(f"Invalid date value(s) on spreadsheet row(s): {', '.join(rows)}.")
+    clean["date"] = parsed_dates
+
+    for column in NUMERIC_COLUMNS:
+        converted = pd.to_numeric(clean[column], errors="coerce")
+        invalid = converted.isna()
+        if invalid.any():
+            rows = [str(index + 2) for index in clean.index[invalid].tolist()]
+            raise ValueError(
+                f"Column '{column}' contains missing or non-numeric values on spreadsheet row(s): {', '.join(rows)}."
+            )
+        if not converted.map(lambda value: Decimal(str(value)).is_finite()).all():
+            raise ValueError(f"Column '{column}' contains non-finite values.")
+        clean[column] = converted.astype(float)
+
+    for column in ("taxable_amount", "cgst_amt", "sgst_amt", "igst_amt", "invoice_total"):
+        negative = clean[column] < 0
+        if negative.any():
+            rows = [str(index + 2) for index in clean.index[negative].tolist()]
+            raise ValueError(
+                f"Column '{column}' contains negative values on spreadsheet row(s): {', '.join(rows)}. "
+                "Credit notes and negative-value invoices are outside this demo's scope."
+            )
+
+    invalid_rates = (clean["gst_rate"] < 0) | (clean["gst_rate"] > 100)
+    if invalid_rates.any():
+        rows = [str(index + 2) for index in clean.index[invalid_rates].tolist()]
+        raise ValueError(f"GST rate must be between 0 and 100 on spreadsheet row(s): {', '.join(rows)}.")
+
+    _normalise_state(seller_state, "Seller state")
+    for index, state in clean["customer_state"].items():
+        _normalise_state(state, f"Buyer state on spreadsheet row {index + 2}")
+
+    return clean
+
+
 def process_invoices(df: pd.DataFrame, seller_state: str) -> pd.DataFrame:
-    """
-    Takes a raw invoice dataframe (as uploaded by the user) and returns
-    an enriched dataframe with expected tax values and a mismatch flag.
-
-    Expected input columns:
-        invoice_no, date, customer_name, customer_state,
-        taxable_amount, gst_rate, cgst_amt, sgst_amt, igst_amt, invoice_total
-    """
-    required_cols = [
-        "invoice_no", "date", "customer_name", "customer_state",
-        "taxable_amount", "gst_rate", "cgst_amt", "sgst_amt", "igst_amt", "invoice_total"
-    ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required column(s) in uploaded file: {missing}")
-
+    """Validate invoices and append expected tax calculations and mismatch flags."""
+    clean = _prepare_invoice_data(df, seller_state)
     results = []
-    for _, row in df.iterrows():
+
+    for _, row in clean.iterrows():
         expected = calculate_gst(
-            taxable_amount=float(row["taxable_amount"]),
-            gst_rate=float(row["gst_rate"]),
+            taxable_amount=row["taxable_amount"],
+            gst_rate=row["gst_rate"],
             seller_state=seller_state,
-            buyer_state=str(row["customer_state"]),
+            buyer_state=row["customer_state"],
         )
 
-        cgst_diff = abs(expected["expected_cgst"] - float(row["cgst_amt"]))
-        sgst_diff = abs(expected["expected_sgst"] - float(row["sgst_amt"]))
-        igst_diff = abs(expected["expected_igst"] - float(row["igst_amt"]))
-        total_diff = abs(expected["expected_invoice_total"] - float(row["invoice_total"]))
-
-        is_mismatch = (
-            cgst_diff > TOLERANCE
-            or sgst_diff > TOLERANCE
-            or igst_diff > TOLERANCE
-            or total_diff > TOLERANCE
-        )
-
+        differences = {
+            "cgst_amt": abs(expected["expected_cgst"] - float(row["cgst_amt"])),
+            "sgst_amt": abs(expected["expected_sgst"] - float(row["sgst_amt"])),
+            "igst_amt": abs(expected["expected_igst"] - float(row["igst_amt"])),
+            "invoice_total": abs(expected["expected_invoice_total"] - float(row["invoice_total"])),
+        }
         reasons = []
-        if cgst_diff > TOLERANCE:
-            reasons.append(f"CGST off by Rs.{cgst_diff:.2f}")
-        if sgst_diff > TOLERANCE:
-            reasons.append(f"SGST off by Rs.{sgst_diff:.2f}")
-        if igst_diff > TOLERANCE:
-            reasons.append(f"IGST off by Rs.{igst_diff:.2f}")
-        if total_diff > TOLERANCE:
-            reasons.append(f"Invoice total off by Rs.{total_diff:.2f}")
+        for field, difference in differences.items():
+            if difference > TOLERANCE:
+                display_name = {
+                    "cgst_amt": "CGST",
+                    "sgst_amt": "SGST",
+                    "igst_amt": "IGST",
+                    "invoice_total": "Invoice total",
+                }[field]
+                reasons.append(f"{display_name} off by Rs.{difference:.2f}")
 
-        results.append({
-            **row.to_dict(),
-            **expected,
-            "status": "MISMATCH" if is_mismatch else "OK",
-            "mismatch_reason": "; ".join(reasons) if reasons else "",
-        })
+        results.append(
+            {
+                **row.to_dict(),
+                **expected,
+                "status": "MISMATCH" if reasons else "OK",
+                "mismatch_reason": "; ".join(reasons),
+            }
+        )
 
     return pd.DataFrame(results)
 
 
 def build_summary(processed_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate totals for a quick ledger-style summary sheet."""
+    """Aggregate useful totals from the validated and processed invoice table."""
+    if processed_df.empty:
+        raise ValueError("Cannot build a summary from an empty invoice table.")
+
     summary = {
         "Total Invoices": len(processed_df),
-        "Total Taxable Amount": round(processed_df["taxable_amount"].sum(), 2),
-        "Total CGST Collected": round(processed_df["cgst_amt"].sum(), 2),
-        "Total SGST Collected": round(processed_df["sgst_amt"].sum(), 2),
-        "Total IGST Collected": round(processed_df["igst_amt"].sum(), 2),
-        "Total Invoice Value": round(processed_df["invoice_total"].sum(), 2),
+        "Total Taxable Amount": round(float(processed_df["taxable_amount"].sum()), 2),
+        "Total CGST Collected": round(float(processed_df["cgst_amt"].sum()), 2),
+        "Total SGST Collected": round(float(processed_df["sgst_amt"].sum()), 2),
+        "Total IGST Collected": round(float(processed_df["igst_amt"].sum()), 2),
+        "Total Invoice Value": round(float(processed_df["invoice_total"].sum()), 2),
         "Invoices Flagged as Mismatch": int((processed_df["status"] == "MISMATCH").sum()),
         "Report Generated On": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -119,13 +232,15 @@ def build_summary(processed_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_ledger(input_path: str, output_path: str, seller_state: str = "Maharashtra"):
-    """CLI-friendly entry point: reads a CSV/Excel invoice file and writes
-    a formatted Excel ledger with a Summary sheet, full processed data,
-    and a Mismatches-only sheet."""
-    if input_path.endswith(".csv"):
-        df = pd.read_csv(input_path)
+    """Read a CSV/Excel invoice file and write a three-sheet Excel ledger."""
+    input_file = Path(input_path)
+    suffix = input_file.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(input_file)
+    elif suffix in {".xlsx", ".xls"}:
+        df = pd.read_excel(input_file)
     else:
-        df = pd.read_excel(input_path)
+        raise ValueError("Input file must use the .csv, .xlsx, or .xls extension.")
 
     processed = process_invoices(df, seller_state)
     summary = build_summary(processed)
