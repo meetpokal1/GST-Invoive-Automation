@@ -1,35 +1,37 @@
-"""
-generate_ledger.py
-Command-line entry point (useful for demos, cron jobs, or when you don't
-want to spin up the Streamlit UI).
-
-Usage:
-    python generate_ledger.py sample_data/invoices_sample.csv output_ledger.xlsx
-"""
+"""Command-line interface for generating an Excel invoice ledger."""
 
 import sys
+
 from gst_engine import generate_ledger
 
 
-def main():
+def main() -> int:
     if len(sys.argv) < 3:
-        print("Usage: python generate_ledger.py <input_file> <output_file> [seller_state]")
-        sys.exit(1)
+        print(
+            "Usage: python generate_ledger.py <input_file> <output_file> [seller_state]",
+            file=sys.stderr,
+        )
+        return 2
 
     input_path = sys.argv[1]
     output_path = sys.argv[2]
     seller_state = sys.argv[3] if len(sys.argv) > 3 else "Maharashtra"
 
-    processed, summary = generate_ledger(input_path, output_path, seller_state)
+    try:
+        processed, summary = generate_ledger(input_path, output_path, seller_state)
+    except (OSError, ValueError, ImportError) as exc:
+        print(f"Could not generate the ledger: {exc}", file=sys.stderr)
+        return 1
 
     print("\n=== SUMMARY ===")
     for _, row in summary.iterrows():
         print(f"{row['Metric']}: {row['Value']}")
 
-    mismatch_count = (processed["status"] == "MISMATCH").sum()
+    mismatch_count = int((processed["status"] == "MISMATCH").sum())
     print(f"\nLedger written to: {output_path}")
     print(f"{mismatch_count} invoice(s) flagged for review.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
