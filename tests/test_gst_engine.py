@@ -8,6 +8,7 @@ from gst_engine import (
     calculate_gst,
     generate_ledger,
     process_invoices,
+    build_review_queue,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,11 @@ def test_included_sample_has_ten_invoices_and_two_mismatches():
         "INV-1005",
         "INV-1009",
     }
+    by_invoice = processed.set_index("invoice_no")
+    assert by_invoice.loc["INV-1005", "exception_category"] == "TAX_COMPONENT_AND_TOTAL"
+    assert by_invoice.loc["INV-1005", "review_priority"] == "Medium"
+    assert by_invoice.loc["INV-1009", "exception_category"] == "TAX_HEAD_ALLOCATION"
+    assert by_invoice.loc["INV-1009", "review_priority"] == "High"
 
 
 def test_small_paise_difference_within_tolerance_is_not_flagged():
@@ -122,11 +128,27 @@ def test_generate_ledger_creates_expected_sheets(tmp_path):
             "Summary",
             "All Invoices",
             "Mismatches Only",
+            "Review Queue",
         ]
         mismatch_sheet = pd.read_excel(workbook, sheet_name="Mismatches Only")
+        review_queue = pd.read_excel(workbook, sheet_name="Review Queue")
     assert set(mismatch_sheet["invoice_no"]) == {"INV-1005", "INV-1009"}
+    assert list(review_queue["invoice_no"]) == ["INV-1009", "INV-1005"]
+    assert "recommended_review_action" in review_queue.columns
 
 
 def test_unsupported_input_extension_is_rejected():
     with pytest.raises(ValueError, match=".csv, .xlsx, or .xls"):
         generate_ledger("invoices.json", "out.xlsx")
+
+
+
+def test_review_queue_is_exception_only_and_priority_ordered():
+    processed = process_invoices(sample_data(), "Maharashtra")
+    queue = build_review_queue(processed)
+
+    assert len(queue) == 2
+    assert list(queue["invoice_no"]) == ["INV-1009", "INV-1005"]
+    assert queue.iloc[0]["review_priority"] == "High"
+    assert queue.iloc[0]["exception_category"] == "TAX_HEAD_ALLOCATION"
+    assert queue.iloc[0]["recommended_review_action"]
