@@ -47,7 +47,8 @@ def test_included_sample_has_ten_invoices_and_two_mismatches():
         "INV-1009",
     }
     by_invoice = processed.set_index("invoice_no")
-    assert by_invoice.loc["INV-1005", "exception_category"] == "TAX_HEAD_AND_TOTAL"
+    assert by_invoice.loc["INV-1005", "exception_category"] == "TAX_COMPONENT_AND_TOTAL"
+    assert by_invoice.loc["INV-1005", "review_priority"] == "Medium"
     assert by_invoice.loc["INV-1009", "exception_category"] == "TAX_HEAD_ALLOCATION"
     assert by_invoice.loc["INV-1009", "review_priority"] == "High"
 
