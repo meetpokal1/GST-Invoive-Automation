@@ -240,7 +240,7 @@ def process_invoices(df: pd.DataFrame, seller_state: str) -> pd.DataFrame:
             )
         elif total_issue and component_errors:
             category = "TAX_COMPONENT_AND_TOTAL"
-            priority = "High"
+            priority = "Medium"
             action = (
                 "Recheck each reported tax component and the invoice total against the source invoice; "
                 "this demo assumes no extra charges or discounts."
