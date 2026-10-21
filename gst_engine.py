@@ -201,17 +201,97 @@ def process_invoices(df: pd.DataFrame, seller_state: str) -> pd.DataFrame:
                 }[field]
                 reasons.append(f"{display_name} off by Rs.{difference:.2f}")
 
+        component_fields = ("cgst_amt", "sgst_amt", "igst_amt")
+        component_errors = [field for field in component_fields if differences[field] > TOLERANCE]
+        expected_components = {
+            "cgst_amt": expected["expected_cgst"],
+            "sgst_amt": expected["expected_sgst"],
+            "igst_amt": expected["expected_igst"],
+        }
+        reported_components = {
+            "cgst_amt": float(row["cgst_amt"]),
+            "sgst_amt": float(row["sgst_amt"]),
+            "igst_amt": float(row["igst_amt"]),
+        }
+        # This pattern is a review hint only; it is not a legal place-of-supply determination.
+        tax_head_issue = any(
+            expected_components[field] <= TOLERANCE and reported_components[field] > TOLERANCE
+            for field in component_fields
+        )
+        total_issue = differences["invoice_total"] > TOLERANCE
+
+        if not reasons:
+            category = "NO_EXCEPTION"
+            priority = "None"
+            action = "No discrepancy detected under this tool's simplified rules."
+        elif tax_head_issue and total_issue:
+            category = "TAX_HEAD_AND_TOTAL"
+            priority = "High"
+            action = (
+                "Compare the original invoice, place-of-supply facts, tax-head allocation, taxable value, "
+                "additional charges and rounding. Do not auto-correct."
+            )
+        elif tax_head_issue:
+            category = "TAX_HEAD_ALLOCATION"
+            priority = "High"
+            action = (
+                "Verify the applicable place-of-supply/tax-head treatment against the source invoice "
+                "and transaction facts before posting."
+            )
+        elif total_issue and component_errors:
+            category = "TAX_COMPONENT_AND_TOTAL"
+            priority = "High"
+            action = (
+                "Recheck each reported tax component and the invoice total against the source invoice; "
+                "this demo assumes no extra charges or discounts."
+            )
+        elif component_errors:
+            category = "TAX_COMPONENT_AMOUNT"
+            priority = "Medium"
+            action = "Recalculate the affected tax component(s) and compare with the source invoice."
+        else:
+            category = "INVOICE_TOTAL"
+            priority = "Medium"
+            action = (
+                "Check taxable value, rate, additional charges/discounts and rounding; "
+                "this demo assumes invoice total = taxable value + GST."
+            )
+
         results.append(
             {
                 **row.to_dict(),
                 **expected,
                 "status": "MISMATCH" if reasons else "OK",
                 "mismatch_reason": "; ".join(reasons),
+                "exception_category": category,
+                "review_priority": priority,
+                "recommended_review_action": action,
             }
         )
 
     return pd.DataFrame(results)
 
+
+
+def build_review_queue(processed_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a compact, priority-ordered list of invoice exceptions for human review."""
+    if processed_df.empty:
+        raise ValueError("Cannot build a review queue from an empty invoice table.")
+    if "exception_category" not in processed_df.columns:
+        raise ValueError("Processed invoice data is missing exception triage fields.")
+
+    queue = processed_df.loc[processed_df["status"] == "MISMATCH"].copy()
+    priority_order = {"High": 0, "Medium": 1, "Low": 2, "None": 3}
+    queue["_priority_sort"] = queue["review_priority"].map(priority_order).fillna(9)
+    queue = queue.sort_values(["_priority_sort", "date", "invoice_no"], kind="stable")
+    queue = queue.drop(columns=["_priority_sort"])
+    preferred_columns = [
+        "invoice_no", "date", "customer_name", "customer_state", "taxable_amount", "gst_rate",
+        "expected_cgst", "expected_sgst", "expected_igst", "expected_invoice_total",
+        "cgst_amt", "sgst_amt", "igst_amt", "invoice_total", "exception_category",
+        "review_priority", "mismatch_reason", "recommended_review_action",
+    ]
+    return queue[[column for column in preferred_columns if column in queue.columns]].reset_index(drop=True)
 
 def build_summary(processed_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate useful totals from the validated and processed invoice table."""
@@ -226,6 +306,9 @@ def build_summary(processed_df: pd.DataFrame) -> pd.DataFrame:
         "Total IGST Collected": round(float(processed_df["igst_amt"].sum()), 2),
         "Total Invoice Value": round(float(processed_df["invoice_total"].sum()), 2),
         "Invoices Flagged as Mismatch": int((processed_df["status"] == "MISMATCH").sum()),
+        "High-Priority Review Items": int((processed_df["review_priority"] == "High").sum()),
+        "Tax-Head Allocation Exceptions": int(processed_df["exception_category"].isin(["TAX_HEAD_ALLOCATION", "TAX_HEAD_AND_TOTAL"]).sum()),
+        "Invoice-Total Exceptions": int(processed_df["exception_category"].isin(["INVOICE_TOTAL", "TAX_HEAD_AND_TOTAL", "TAX_COMPONENT_AND_TOTAL"]).sum()),
         "Report Generated On": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     return pd.DataFrame(list(summary.items()), columns=["Metric", "Value"])
@@ -245,10 +328,12 @@ def generate_ledger(input_path: str, output_path: str, seller_state: str = "Maha
     processed = process_invoices(df, seller_state)
     summary = build_summary(processed)
     mismatches = processed[processed["status"] == "MISMATCH"]
+    review_queue = build_review_queue(processed)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="Summary", index=False)
         processed.to_excel(writer, sheet_name="All Invoices", index=False)
         mismatches.to_excel(writer, sheet_name="Mismatches Only", index=False)
+        review_queue.to_excel(writer, sheet_name="Review Queue", index=False)
 
     return processed, summary
