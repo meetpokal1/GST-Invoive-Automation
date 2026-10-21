@@ -5,7 +5,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from gst_engine import build_summary, process_invoices
+from gst_engine import build_review_queue, build_summary, process_invoices
 
 st.set_page_config(page_title="GST Invoice & Ledger Automation", layout="wide")
 st.title("GST Invoice & Ledger Automation Tool")
@@ -49,16 +49,19 @@ else:
 
         processed = process_invoices(raw_df, seller_state)
         summary = build_summary(processed)
+        review_queue = build_review_queue(processed)
         summary_values = dict(zip(summary["Metric"], summary["Value"]))
         mismatch_count = int(summary_values["Invoices Flagged as Mismatch"])
+        high_priority_count = int(summary_values["High-Priority Review Items"])
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Invoices", int(summary_values["Total Invoices"]))
         col2.metric(
             "Total Invoice Value",
             f"₹{summary_values['Total Invoice Value']:,.2f}",
         )
         col3.metric("Flagged Mismatches", mismatch_count)
+        col4.metric("High-Priority Review", high_priority_count)
 
         st.subheader("Summary")
         st.dataframe(summary, use_container_width=True, hide_index=True)
@@ -79,13 +82,13 @@ else:
             hide_index=True,
         )
 
+        st.subheader("Actionable Exception Review Queue")
+        st.caption(
+            "Priority is a workflow hint based on discrepancy patterns in this demo; "
+            "it is not a legal determination. Review source documents before acting."
+        )
         if mismatch_count:
-            st.subheader("Records Requiring Review")
-            st.dataframe(
-                processed.loc[processed["status"] == "MISMATCH"],
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(review_queue, use_container_width=True, hide_index=True)
         else:
             st.success("No mismatches were detected using the configured tolerance.")
 
@@ -96,6 +99,7 @@ else:
             processed.loc[processed["status"] == "MISMATCH"].to_excel(
                 writer, sheet_name="Mismatches Only", index=False
             )
+            review_queue.to_excel(writer, sheet_name="Review Queue", index=False)
 
         st.download_button(
             label="Download Excel Ledger",
