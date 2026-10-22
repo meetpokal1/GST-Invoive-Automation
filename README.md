@@ -2,6 +2,13 @@
 
 A Python + Streamlit prototype that checks invoice-level GST calculations and turns discrepancies into a prioritised, review-ready queue. It demonstrates data validation, business-rule reasoning, exception triage, automated tests, and Excel reporting.
 
+## Interface Preview (Illustrative)
+
+![GST invoice review UI preview with synthetic sample data](screenshots/gst-review-dashboard.svg)
+
+> Illustrative interface preview based on the app's invoice validation and exception review features. This is not a screenshot captured from a running instance.
+
+
 > **Important scope note:** This is a learning and decision-support prototype, not a full GST-compliance or reconciliation product. It uses a simplified state-comparison rule for CGST/SGST versus IGST and assumes invoice value equals taxable value plus GST. It does not implement every place-of-supply rule or cover exempt supplies, cess, discounts, freight, reverse charge, credit/debit notes, and other special cases. The review priority is a workflow hint—not a legal determination. A qualified professional must verify source documents and applicable rules.
 
 ## The problem it addresses
