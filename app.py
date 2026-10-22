@@ -1,7 +1,7 @@
 """Streamlit interface for the GST Invoice & Ledger Automation Tool."""
 
 import io
-
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -10,12 +10,12 @@ from gst_engine import build_review_queue, build_summary, process_invoices
 st.set_page_config(page_title="GST Invoice & Ledger Automation", layout="wide")
 st.title("GST Invoice & Ledger Automation Tool")
 st.caption(
-    "Upload a batch of invoices, compare entered tax amounts with a simplified "
-    "expected calculation, and export records that need review."
+    "Automated reconciliation workbench: compare entered tax amounts with state-based "
+    "expected tax rules, identify discrepancies within tolerance, and export prioritized audit ledgers."
 )
 st.info(
-    "Demonstration only: this app uses a simplified state-comparison rule and "
-    "does not cover every GST scenario. Flagged records require human review."
+    "Demonstration only: this application uses simplified state-comparison rules and synthetic data. "
+    "Flagged records assist human review and do not constitute a legal tax determination."
 )
 
 with st.sidebar:
@@ -27,26 +27,55 @@ with st.sidebar:
         "invoice_no, date, customer_name, customer_state, "
         "taxable_amount, gst_rate, cgst_amt, sgst_amt, igst_amt, invoice_total"
     )
+    st.markdown("---")
     st.markdown(
-        "Try the synthetic sample file: "
-        "sample_data/invoices_sample.csv (includes two intentional mismatches)."
+        "**Synthetic Sample Data:**\n"
+        "Includes 10 multi-state invoices with ₹0.50 rounding tolerance checks and 2 intentional mismatches for review."
     )
 
-uploaded_file = st.file_uploader(
-    "Upload invoice file (CSV or Excel)",
-    type=["csv", "xlsx"],
-    help="Use the required column names listed in the sidebar.",
-)
+sample_csv_path = Path(__file__).resolve().parent / "sample_data" / "invoices_sample.csv"
 
-if uploaded_file is None:
-    st.info("Upload an invoice file or run the included synthetic sample data.")
-else:
+c_upload, c_sample = st.columns([3, 1])
+with c_upload:
+    uploaded_file = st.file_uploader(
+        "Upload invoice file (CSV or Excel)",
+        type=["csv", "xlsx"],
+        help="Use the required column names listed in the sidebar.",
+    )
+
+with c_sample:
+    st.write("")
+    st.write("")
+    if st.button("📊 Reset to Sample Data"):
+        st.session_state["use_sample"] = True
+
+if uploaded_file is not None:
+    st.session_state["use_sample"] = False
+
+raw_df = None
+source_label = ""
+
+if uploaded_file is not None:
+    source_label = f"Uploaded file: {uploaded_file.name}"
     try:
         if uploaded_file.name.lower().endswith(".csv"):
             raw_df = pd.read_csv(uploaded_file)
         else:
             raw_df = pd.read_excel(uploaded_file)
+    except Exception as exc:
+        st.error(f"Could not read uploaded file: {exc}")
+elif st.session_state.get("use_sample", True) and sample_csv_path.exists():
+    source_label = "Synthetic Sample Invoices (10 multi-state records with 2 intentional review mismatches)"
+    try:
+        raw_df = pd.read_csv(sample_csv_path)
+    except Exception as exc:
+        st.error(f"Could not load sample data: {exc}")
 
+if raw_df is None:
+    st.info("Upload an invoice file or click 'Reset to Sample Data' to explore the reconciliation workbench.")
+else:
+    try:
+        st.caption(f"📁 **Active Dataset:** {source_label}")
         processed = process_invoices(raw_df, seller_state)
         summary = build_summary(processed)
         review_queue = build_review_queue(processed)
